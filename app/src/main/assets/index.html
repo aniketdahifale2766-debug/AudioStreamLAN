@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>AudioStreamLAN</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,Segoe UI,sans-serif}body{margin:0;background:#0b0d10;color:#f4f5f7;min-height:100vh}main{max-width:620px;margin:auto;padding:28px 20px 40px}.card{background:#15181d;border:1px solid #292e36;border-radius:20px;padding:20px;margin-bottom:16px;box-shadow:0 8px 30px #0005}h1{font-size:26px;margin:0 0 8px}.sub{color:#aab1bc;font-size:14px;margin-bottom:22px}.status{display:flex;align-items:center;gap:9px;font-size:14px}.dot{width:10px;height:10px;border-radius:50%;background:#777}.dot.on{background:#36d17c;box-shadow:0 0 12px #36d17c}.big{font-size:18px;font-weight:650;margin:18px 0 8px}button{width:100%;border:0;border-radius:14px;padding:15px;font-size:16px;font-weight:700;background:#fff;color:#111}button:disabled{opacity:.5}.slider{width:100%;accent-color:#fff}.row{display:flex;justify-content:space-between;gap:15px;color:#aab1bc;font-size:13px}.value{color:#fff;font-weight:700}.hint{color:#8f98a5;font-size:12px;line-height:1.5;margin-top:12px}.mono{font-family:ui-monospace,SFMono-Regular,monospace;word-break:break-all;color:#fff;font-size:13px}.error{color:#ff8c8c}.ok{color:#79e7a5}.meter{height:6px;background:#292e36;border-radius:10px;overflow:hidden;margin-top:14px}.meter>i{display:block;height:100%;width:0;background:#79e7a5;transition:width .1s}
+</style>
+</head>
+<body>
+<main>
+<div class="card">
+<h1>AudioStreamLAN</h1>
+<div class="sub">Live system-audio listener over the same Wi‑Fi network.</div>
+<div class="status"><span id="dot" class="dot"></span><span id="status">Connecting…</span></div>
+<div class="meter"><i id="meter"></i></div>
+</div>
+<div class="card">
+<div class="big">Playback delay</div>
+<div class="row"><span>80 ms</span><span class="value" id="latencyValue">150 ms</span><span>1000 ms</span></div>
+<input id="latency" class="slider" type="range" min="80" max="1000" step="10" value="150">
+<div class="hint">Each browser controls its own delay. Increase it if Wi‑Fi jitter causes gaps or if you need to line up with another speaker/video.</div>
+</div>
+<div class="card">
+<button id="start">Tap to start listening</button>
+<div class="hint" id="info">The browser will ask for permission to play audio. The phone itself does not receive microphone audio.</div>
+</div>
+<div class="card">
+<div class="row"><span>Connection</span><span id="connection">Offline</span></div>
+<div class="row" style="margin-top:10px"><span>Audio</span><span>48 kHz / 16-bit stereo PCM</span></div>
+<div class="row" style="margin-top:10px"><span>Buffer</span><span id="buffer">0 ms</span></div>
+</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const latency=$('latency'),latencyValue=$('latencyValue'),start=$('start'),statusEl=$('status'),dot=$('dot'),connection=$('connection'),bufferEl=$('buffer'),meter=$('meter'),info=$('info');
+let socket=null,retryTimer=null,ctx=null,node=null,started=false,pending=[],queuedBytes=0;
+const MAX_PENDING=120;
+latency.oninput=()=>{const v=Number(latency.value);latencyValue.textContent=v+' ms';if(node)node.port.postMessage({type:'latency',ms:v});};
+function setStatus(text,on=false){statusEl.textContent=text;dot.className='dot'+(on?' on':'');}
+function connect(){
+ clearTimeout(retryTimer);
+ const scheme=location.protocol==='https:'?'wss':'ws';
+ socket=new WebSocket(`${scheme}://${location.host}/`);socket.binaryType='arraybuffer';connection.textContent='Connecting…';
+ socket.onopen=()=>{connection.textContent='Connected';setStatus(started?'Streaming':'Ready',true);};
+ socket.onclose=()=>{connection.textContent='Reconnecting…';setStatus('Server connection lost');retryTimer=setTimeout(connect,1000);};
+ socket.onerror=()=>{connection.textContent='Connection error';};
+ socket.onmessage=e=>{
+  if(typeof e.data==='string') return;
+  if(node){node.port.postMessage({type:'pcm',buffer:e.data},[e.data]);}
+  else {pending.push(e.data);queuedBytes+=e.data.byteLength;if(pending.length>MAX_PENDING){queuedBytes-=pending.shift().byteLength;}}
+  updateMeter();
+ };
+}
+function updateMeter(){const ms=Math.round((queuedBytes/4)/48000*1000);bufferEl.textContent=ms+' ms';meter.style.width=Math.min(100,ms/10)+'%';}
+const workletCode=`class LANPCMProcessor extends AudioWorkletProcessor{
+ constructor(){super();this.q=[];this.frames=0;this.pos=0;this.delay=150;this.priming=true;this.port.onmessage=e=>{const d=e.data;if(d.type==='latency'){this.delay=Math.max(80,Math.min(1000,d.ms));if(this.frames*1000/sampleRate<this.delay)this.priming=true;}else if(d.type==='pcm'){const a=new Int16Array(d.buffer);const f=new Float32Array(a.length);for(let i=0;i<a.length;i++)f[i]=a[i]/32768;this.q.push(f);this.frames+=f.length/2;}}}
+ takeSample(){if(!this.q.length)return null;const c=this.q[0];const i=this.pos*2;if(i+1>=c.length){this.q.shift();this.pos=0;return this.takeSample();}const l=c[i]/1,r=c[i+1]/1;this.pos++;this.frames--;return [l,r];}
+ process(inputs,outputs){const out=outputs[0],L=out[0],R=out[1]||out[0];if(this.priming&&this.frames*1000/sampleRate>=this.delay)this.priming=false;for(let i=0;i<L.length;i++){if(this.priming){L[i]=0;R[i]=0;continue;}const s=this.takeSample();if(!s){L[i]=0;R[i]=0;this.priming=true;}else{L[i]=s[0];R[i]=s[1];}}this.port.postMessage({type:'buffer',ms:Math.round(this.frames*1000/sampleRate)});return true;}}
+registerProcessor('lan-pcm',LANPCMProcessor);`;
+async function startAudio(){
+ if(started)return;
+ start.disabled=true;info.textContent='Starting audio engine…';
+ try{
+  ctx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:48000});await ctx.resume();
+  let workletOK=false;
+  if(ctx.audioWorklet){try{const blob=new Blob([workletCode],{type:'application/javascript'});const u=URL.createObjectURL(blob);await ctx.audioWorklet.addModule(u);URL.revokeObjectURL(u);node=new AudioWorkletNode(ctx,'lan-pcm',{numberOfInputs:0,numberOfOutputs:1,outputChannelCount:[2]});node.connect(ctx.destination);node.port.onmessage=e=>{if(e.data?.type==='buffer'){bufferEl.textContent=e.data.ms+' ms';meter.style.width=Math.min(100,e.data.ms/10)+'%';}};workletOK=true;}catch(e){console.warn('AudioWorklet unavailable',e);}}
+  if(!workletOK){await setupScheduledFallback();}
+  if(node){for(const b of pending.splice(0)){node.port.postMessage({type:'pcm',buffer:b},[b]);}queuedBytes=0;}
+  started=true;setStatus('Listening',true);start.textContent='Listening';info.textContent=workletOK?'AudioWorklet mode: low-overhead playback.':'Compatibility mode: scheduled Web Audio playback.';
+ }catch(e){console.error(e);start.disabled=false;info.innerHTML='<span class="error">Audio could not start: '+(e.message||e)+'</span>';}
+}
+async function setupScheduledFallback(){
+ const queue=[];let playing=false,queued=0,nextTime=ctx.currentTime+Number(latency.value)/1000;
+ const pump=()=>{while(queue.length&&nextTime<ctx.currentTime+1.5){const b=queue.shift();const a=new Int16Array(b);const frames=a.length/2;const ab=ctx.createBuffer(2,frames,48000);const l=ab.getChannelData(0),r=ab.getChannelData(1);for(let i=0;i<frames;i++){l[i]=a[i*2]/32768;r[i]=a[i*2+1]/32768;}const src=ctx.createBufferSource();src.buffer=ab;src.connect(ctx.destination);if(nextTime<ctx.currentTime+0.01)nextTime=ctx.currentTime+Number(latency.value)/1000;src.start(nextTime);nextTime+=frames/48000;queued+=frames;src.onended=()=>{queued-=frames;updateMeter();};}requestAnimationFrame(pump);};
+ socket.onmessage=e=>{if(typeof e.data==='string')return;queue.push(e.data);pump();};pump();
+}
+start.onclick=startAudio;connect();latencyValue.textContent=latency.value+' ms';
+</script>
+</body>
+</html>
