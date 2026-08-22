@@ -10,14 +10,12 @@ android {
         applicationId = "com.audio.streamlan"
         minSdk = 29
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.0.2"
+        versionCode = 5
+        versionName = "1.0.3"
     }
 
     buildTypes {
-        release {
-            isMinifyEnabled = false
-        }
+        release { isMinifyEnabled = false }
     }
 
     compileOptions {
