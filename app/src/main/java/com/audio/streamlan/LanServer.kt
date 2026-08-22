@@ -11,15 +11,13 @@ import java.util.concurrent.CopyOnWriteArraySet
 
 /** Local-only HTTP + WebSocket server. Audio is never sent to the internet. */
 class LanServer(private val context: Context, private val port: Int = 8080) : NanoWSD(port) {
-
     companion object { private const val TAG = "AudioStreamLAN" }
-
     private val clients = CopyOnWriteArraySet<StreamSocket>()
     @Volatile private var running = false
 
     fun startServer() {
         if (running) return
-        start(SOCKET_READ_TIMEOUT, false)
+        start()
         running = true
         Log.i(TAG, "LAN server started on $url")
     }
@@ -53,9 +51,7 @@ class LanServer(private val context: Context, private val port: Int = 8080) : Na
 
     override fun serveHttp(session: IHTTPSession): Response = when (session.uri) {
         "/", "/index.html" -> assetResponse("index.html", "text/html; charset=utf-8")
-        "/health" -> NanoHTTPD.newFixedLengthResponse(
-            Response.Status.OK, "application/json", "{\"ok\":true,\"clients\":$clientCount}"
-        )
+        "/health" -> NanoHTTPD.newFixedLengthResponse(Response.Status.OK, "application/json", "{\"ok\":true,\"clients\":$clientCount}")
         else -> NanoHTTPD.newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain; charset=utf-8", "Not found")
     }
 
@@ -72,35 +68,23 @@ class LanServer(private val context: Context, private val port: Int = 8080) : Na
             Log.i(TAG, "Browser connected; clients=${clients.size}")
             runCatching { send("{\"type\":\"hello\",\"sampleRate\":48000,\"channels\":2}") }
         }
-
-        override fun onClose(code: CloseCode, reason: String, initiatedByRemote: Boolean) {
-            clients.remove(this)
-            Log.i(TAG, "Browser disconnected; clients=${clients.size}")
-        }
-
+        override fun onClose(code: CloseCode, reason: String, initiatedByRemote: Boolean) { clients.remove(this); Log.i(TAG, "Browser disconnected; clients=${clients.size}") }
         override fun onMessage(message: WebSocketFrame) = Unit
         override fun onPong(pong: WebSocketFrame) = Unit
-
-        override fun onException(exception: IOException) {
-            Log.w(TAG, "WebSocket exception", exception)
-            clients.remove(this)
-        }
+        override fun onException(exception: IOException) { Log.w(TAG, "WebSocket exception", exception); clients.remove(this) }
     }
 
-    private fun localIpAddress(): String {
-        return try {
-            val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-            val addresses = interfaces.flatMap { Collections.list(it.inetAddresses) }
-                .filter { !it.isLoopbackAddress && it.hostAddress?.contains(':') == false }
-                .mapNotNull { it.hostAddress }
-            addresses.firstOrNull { ip ->
-                val parts = ip.split('.')
-                ip.startsWith("192.168.") || ip.startsWith("10.") ||
-                    (parts.size == 4 && parts[0] == "172" && parts[1].toIntOrNull() in 16..31)
-            } ?: addresses.firstOrNull() ?: "127.0.0.1"
-        } catch (e: Exception) {
-            Log.w(TAG, "Could not determine local IP", e)
-            "127.0.0.1"
-        }
+    private fun localIpAddress(): String = try {
+        val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
+        val addresses = interfaces.flatMap { Collections.list(it.inetAddresses) }
+            .filter { !it.isLoopbackAddress && it.hostAddress?.contains(':') == false }
+            .mapNotNull { it.hostAddress }
+        addresses.firstOrNull { ip ->
+            val parts = ip.split('.')
+            ip.startsWith("192.168.") || ip.startsWith("10.") || (parts.size == 4 && parts[0] == "172" && parts[1].toIntOrNull() in 16..31)
+        } ?: addresses.firstOrNull() ?: "127.0.0.1"
+    } catch (e: Exception) {
+        Log.w(TAG, "Could not determine local IP", e)
+        "127.0.0.1"
     }
 }
