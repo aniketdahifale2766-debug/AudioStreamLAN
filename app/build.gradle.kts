@@ -4,7 +4,7 @@ plugins {
 
 android {
     namespace = "com.audio.streamlan"
-    compileSdk = 36
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.audio.streamlan"
