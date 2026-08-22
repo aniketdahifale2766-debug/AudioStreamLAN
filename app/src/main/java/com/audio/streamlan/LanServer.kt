@@ -24,7 +24,7 @@ class LanServer(private val context: Context, private val port: Int = 8080) : Na
 
     fun stopServer() {
         if (!running) return
-        clients.forEach { runCatching { it.close() } }
+        clients.forEach { runCatching { it.close(NanoWSD.WebSocketFrame.CloseCode.NormalClosure, "", false) } }
         clients.clear()
         stop()
         running = false
@@ -42,7 +42,7 @@ class LanServer(private val context: Context, private val port: Int = 8080) : Na
             } catch (e: IOException) {
                 Log.w(TAG, "Removing failed WebSocket client", e)
                 clients.remove(socket)
-                runCatching { socket.close() }
+                runCatching { socket.close(NanoWSD.WebSocketFrame.CloseCode.NormalClosure, "", false) }
             }
         }
     }
@@ -68,10 +68,16 @@ class LanServer(private val context: Context, private val port: Int = 8080) : Na
             Log.i(TAG, "Browser connected; clients=${clients.size}")
             runCatching { send("{\"type\":\"hello\",\"sampleRate\":48000,\"channels\":2}") }
         }
-        override fun onClose(code: CloseCode, reason: String, initiatedByRemote: Boolean) { clients.remove(this); Log.i(TAG, "Browser disconnected; clients=${clients.size}") }
+        override fun onClose(code: NanoWSD.WebSocketFrame.CloseCode, reason: String, initiatedByRemote: Boolean) {
+            clients.remove(this)
+            Log.i(TAG, "Browser disconnected; clients=${clients.size}")
+        }
         override fun onMessage(message: WebSocketFrame) = Unit
         override fun onPong(pong: WebSocketFrame) = Unit
-        override fun onException(exception: IOException) { Log.w(TAG, "WebSocket exception", exception); clients.remove(this) }
+        override fun onException(exception: IOException) {
+            Log.w(TAG, "WebSocket exception", exception)
+            clients.remove(this)
+        }
     }
 
     private fun localIpAddress(): String = try {
