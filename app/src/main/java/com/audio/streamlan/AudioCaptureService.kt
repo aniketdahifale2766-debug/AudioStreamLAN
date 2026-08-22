@@ -27,7 +27,8 @@ class AudioCaptureService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val TAG = "AudioStreamLAN"
         private const val SAMPLE_RATE = 48_000
-        private const val PACKET_BYTES = 3_840 // 20 ms, 48 kHz, stereo, 16-bit
+        private const val STEREO_PACKET_BYTES = 3_840 // 20 ms, stereo, 16-bit
+        private const val MONO_PACKET_BYTES = 1_920 // 20 ms, mono, 16-bit
     }
 
     private var projection: MediaProjection? = null
@@ -47,21 +48,15 @@ class AudioCaptureService : Service() {
             stopCapture()
             return START_NOT_STICKY
         }
-
         val resultCode = intent?.getIntExtra(EXTRA_RESULT_CODE, -1) ?: -1
         val resultData = intent?.parcelableIntent(EXTRA_RESULT_DATA)
         if (resultCode < 0 || resultData == null) {
             stopSelf()
             return START_NOT_STICKY
         }
-
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(
-                    NOTIFICATION_ID,
-                    buildNotification("Starting local audio stream…"),
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                )
+                startForeground(NOTIFICATION_ID, buildNotification("Starting local audio stream…"), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
             } else {
                 startForeground(NOTIFICATION_ID, buildNotification("Starting local audio stream…"))
             }
@@ -85,15 +80,11 @@ class AudioCaptureService : Service() {
 
     private fun startCapture(resultCode: Int, data: Intent) {
         if (worker?.isAlive == true) return
-
         val manager = getSystemService(MediaProjectionManager::class.java)
         projection = manager.getMediaProjection(resultCode, data)
             ?: throw IllegalStateException("MediaProjection could not be created")
-
         projection!!.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() {
-                if (!stopping) stopCapture()
-            }
+            override fun onStop() { if (!stopping) stopCapture() }
         }, null)
 
         val config = AudioPlaybackCaptureConfiguration.Builder(projection!!)
@@ -101,28 +92,44 @@ class AudioCaptureService : Service() {
             .addMatchingUsage(AudioAttributes.USAGE_GAME)
             .build()
 
-        // Stereo is preferred. Some device builds expose only mono playback capture,
-        // so the fallback prevents an AudioRecord initialization crash.
         recorder = createRecorder(config, AudioFormat.CHANNEL_IN_STEREO)
             ?: createRecorder(config, AudioFormat.CHANNEL_IN_MONO)
             ?: throw IllegalStateException("AudioRecord could not be initialized")
-
         recorder!!.startRecording()
         if (recorder!!.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             throw IllegalStateException("AudioRecord did not enter recording state")
         }
 
+        val mono = recorder!!.channelCount == 1
         saveState(true, server?.url ?: "")
         updateNotification("Streaming system audio • ${server?.url}")
 
         worker = Thread {
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO)
-            val buffer = ByteArray(PACKET_BYTES)
+            val readBuffer = ByteArray(if (mono) MONO_PACKET_BYTES else STEREO_PACKET_BYTES)
+            val outputBuffer = ByteArray(STEREO_PACKET_BYTES)
             try {
                 while (!Thread.currentThread().isInterrupted && !stopping) {
-                    val count = recorder?.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING) ?: -1
-                    if (count > 0) server?.broadcastPcm(buffer, count)
-                    else if (count < 0) Log.w(TAG, "AudioRecord.read returned $count")
+                    val count = recorder?.read(readBuffer, 0, readBuffer.size, AudioRecord.READ_BLOCKING) ?: -1
+                    if (count > 0) {
+                        if (mono) {
+                            val samples = count / 2
+                            var out = 0
+                            var i = 0
+                            while (i + 1 < count && out + 3 < outputBuffer.size) {
+                                outputBuffer[out++] = readBuffer[i]
+                                outputBuffer[out++] = readBuffer[i + 1]
+                                outputBuffer[out++] = readBuffer[i]
+                                outputBuffer[out++] = readBuffer[i + 1]
+                                i += 2
+                            }
+                            server?.broadcastPcm(outputBuffer, samples * 4)
+                        } else {
+                            server?.broadcastPcm(readBuffer, count)
+                        }
+                    } else if (count < 0) {
+                        Log.w(TAG, "AudioRecord.read returned $count")
+                    }
                 }
             } catch (t: Throwable) {
                 if (!stopping) Log.e(TAG, "Capture loop stopped unexpectedly", t)
@@ -130,24 +137,13 @@ class AudioCaptureService : Service() {
         }.also { it.name = "AudioStreamLAN-Capture"; it.start() }
     }
 
-    private fun createRecorder(
-        config: AudioPlaybackCaptureConfiguration,
-        channelMask: Int
-    ): AudioRecord? = try {
-        val minBuffer = AudioRecord.getMinBufferSize(
-            SAMPLE_RATE, channelMask, AudioFormat.ENCODING_PCM_16BIT
-        )
+    private fun createRecorder(config: AudioPlaybackCaptureConfiguration, channelMask: Int): AudioRecord? = try {
+        val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE, channelMask, AudioFormat.ENCODING_PCM_16BIT)
         if (minBuffer <= 0) return null
         val channels = if (channelMask == AudioFormat.CHANNEL_IN_STEREO) 2 else 1
-        val packet = if (channels == 2) PACKET_BYTES else PACKET_BYTES / 2
+        val packet = if (channels == 2) STEREO_PACKET_BYTES else MONO_PACKET_BYTES
         AudioRecord.Builder()
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                    .setSampleRate(SAMPLE_RATE)
-                    .setChannelMask(channelMask)
-                    .build()
-            )
+            .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(SAMPLE_RATE).setChannelMask(channelMask).build())
             .setBufferSizeInBytes(maxOf(minBuffer * 2, packet * 4))
             .setAudioPlaybackCaptureConfig(config)
             .build()
@@ -186,17 +182,15 @@ class AudioCaptureService : Service() {
     }
 
     private fun updateNotification(text: String) {
-        getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, buildNotification(text))
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(text))
     }
 
-    private fun buildNotification(text: String): Notification =
-        Notification.Builder(this, CHANNEL_ID)
-            .setContentTitle("AudioStreamLAN")
-            .setContentText(text)
-            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-            .setOngoing(true)
-            .build()
+    private fun buildNotification(text: String): Notification = Notification.Builder(this, CHANNEL_ID)
+        .setContentTitle("AudioStreamLAN")
+        .setContentText(text)
+        .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+        .setOngoing(true)
+        .build()
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -206,10 +200,7 @@ class AudioCaptureService : Service() {
     }
 
     private fun saveState(running: Boolean, value: String) {
-        getSharedPreferences("state", MODE_PRIVATE).edit()
-            .putBoolean("running", running)
-            .putString("value", value)
-            .apply()
+        getSharedPreferences("state", MODE_PRIVATE).edit().putBoolean("running", running).putString("value", value).apply()
     }
 
     override fun onDestroy() {
